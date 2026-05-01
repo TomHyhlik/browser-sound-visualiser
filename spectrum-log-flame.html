@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Realistic Flame Audio Visualizer</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #000;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    canvas {
+      display: block;
+      filter: blur(1px) contrast(1.2); /* Soften the edges and boost colors */
+    }
+    #overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      color: #ff4500;
+      background-color: rgba(0,0,0,0.9);
+      cursor: pointer;
+      z-index: 1000;
+      text-transform: uppercase;
+      letter-spacing: 5px;
+      text-shadow: 0 0 20px #ff0000;
+      transition: opacity 0.5s;
+    }
+    #controls {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: rgba(40, 10, 0, 0.7);
+      padding: 15px;
+      border-radius: 8px;
+      color: #ff8c00;
+      z-index: 500;
+      border: 1px solid #ff4500;
+      backdrop-filter: blur(5px);
+      transition: transform 0.3s ease, opacity 0.3s ease;
+      box-shadow: 0 0 15px rgba(255, 69, 0, 0.3);
+    }
+    #controls.hidden {
+      transform: translateY(100px);
+      opacity: 0;
+      pointer-events: none;
+    }
+    #toggle-btn {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      background: transparent;
+      color: rgba(255, 255, 255, 0.1); /* Very faint */
+      border: none;
+      padding: 10px;
+      cursor: pointer;
+      z-index: 600;
+      font-weight: bold;
+      font-size: 20px;
+      transition: color 0.3s ease;
+    }
+    #toggle-btn:hover {
+      color: rgba(255, 255, 255, 0.8); /* Becomes visible on hover */
+    }
+    .control-group {
+      margin-bottom: 10px;
+    }
+    label {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+    input[type=range] {
+      width: 150px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay"><h1>Click to Ignite</h1></div>
+  
+  <button id="toggle-btn">&lt;</button>
+  <div id="controls" class="hidden">
+    <div class="control-group">
+      <label for="sensitivity">Sensitivity: <span id="sens-val">1.0</span>x</label>
+      <input type="range" id="sensitivity" min="0.1" max="5" step="0.1" value="1.0">
+    </div>
+    <button id="hide-settings" style="width: 100%; background: #400; color: #f80; border: 1px solid #f80; cursor: pointer; padding: 5px;">Hide</button>
+  </div>
+
+  <canvas id="visualizer"></canvas>
+
+  <script>
+    const canvas = document.getElementById('visualizer');
+    const ctx = canvas.getContext('2d');
+    const overlay = document.getElementById('overlay');
+    const controls = document.getElementById('controls');
+    const toggleBtn = document.getElementById('toggle-btn');
+    const sensitivityInput = document.getElementById('sensitivity');
+    const sensValLabel = document.getElementById('sens-val');
+    const hideSettingsBtn = document.getElementById('hide-settings');
+    
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    let audioContext;
+    let analyser;
+    let dataArray;
+    let source;
+    let particles = [];
+    let time = 0;
+    let sensitivity = 1.0;
+    let hideTimer;
+
+    function resetHideTimer() {
+      clearTimeout(hideTimer);
+      if (!controls.classList.contains('hidden')) {
+        hideTimer = setTimeout(() => {
+          hideSettings();
+        }, 3000);
+      }
+    }
+
+    function hideSettings() {
+      controls.classList.add('hidden');
+      toggleBtn.style.display = 'block';
+    }
+
+    function showSettings() {
+      controls.classList.remove('hidden');
+      toggleBtn.style.display = 'none';
+      resetHideTimer();
+    }
+
+    // Reset timer on any interaction with the controls
+    controls.addEventListener('mousemove', resetHideTimer);
+    controls.addEventListener('mousedown', resetHideTimer);
+    controls.addEventListener('touchstart', resetHideTimer);
+    sensitivityInput.addEventListener('input', (e) => {
+      sensitivity = parseFloat(e.target.value);
+      sensValLabel.textContent = sensitivity.toFixed(1);
+      resetHideTimer();
+    });
+
+    toggleBtn.addEventListener('click', showSettings);
+    hideSettingsBtn.addEventListener('click', hideSettings);
+
+    overlay.addEventListener('click', () => {
+      overlay.style.opacity = '0';
+      setTimeout(() => overlay.remove(), 500);
+      initAudio();
+    });
+
+    function initAudio() {
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(function(stream) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 512;
+          analyser.smoothingTimeConstant = 0.75;
+          source = audioContext.createMediaStreamSource(stream);
+          source.connect(analyser);
+
+          const bufferLength = analyser.frequencyBinCount;
+          dataArray = new Uint8Array(bufferLength);
+
+          renderFrame();
+        })
+        .catch(function(err) {
+          console.log('Error: ' + err);
+        });
+    }
+
+    class Particle {
+      constructor(x, y, size, speedX, speedY, life) {
+        this.x = x;
+        this.y = y;
+        this.size = size;
+        this.speedX = speedX;
+        this.speedY = speedY;
+        this.life = life;
+        this.maxLife = life;
+      }
+
+      update() {
+        this.x += this.speedX + Math.sin(time * 0.1) * 1.5; // More horizontal drift
+        this.y += this.speedY;
+        this.life -= 0.005; // Last twice as long
+        this.size *= 0.995; // Shrink slower
+      }
+
+      draw() {
+        // Calculate fade based on both life and distance from the top
+        const lifeAlpha = this.life / this.maxLife;
+        const distanceAlpha = Math.max(0, (this.y - 50) / (canvas.height - 50)); 
+        const alpha = lifeAlpha * distanceAlpha;
+
+        if (alpha <= 0) return;
+
+        ctx.fillStyle = `rgba(255, ${Math.floor(200 * lifeAlpha)}, 0, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawFlame(x, width, height, intensity) {
+      const gradient = ctx.createLinearGradient(x, canvas.height, x, canvas.height - height);
+      
+      const r = 255;
+      const g = Math.min(255, intensity * 1.5);
+      const b = Math.min(255, intensity * 0.5);
+
+      gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+      gradient.addColorStop(0.1, 'rgba(255, 0, 0, 0.8)');
+      gradient.addColorStop(0.4, `rgba(${r}, ${g}, 0, 0.9)`);
+      gradient.addColorStop(0.8, `rgba(${r}, 255, ${b}, 1)`);
+      gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(x - width / 2, canvas.height);
+
+      const wobble = Math.sin(time + x * 0.01) * (width * 0.5);
+      const tipX = x + wobble;
+      const tipY = canvas.height - height;
+
+      ctx.quadraticCurveTo(
+        x - width * 1.5 + Math.sin(time) * 10, 
+        canvas.height - height * 0.5, 
+        tipX, 
+        tipY
+      );
+      ctx.quadraticCurveTo(
+        x + width * 1.5 + Math.cos(time) * 10, 
+        canvas.height - height * 0.5, 
+        x + width / 2, 
+        canvas.height
+      );
+
+      ctx.fillStyle = gradient;
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fill();
+      ctx.restore();
+
+      if (intensity > 150 && Math.random() > 0.7) { // More frequent at lower intensity
+        particles.push(new Particle(
+          tipX, 
+          tipY, 
+          Math.random() * 4 + 1, 
+          (Math.random() - 0.5) * 4, 
+          -Math.random() * 8 - 4, // Much faster upward speed
+          Math.random() * 1.5 + 1.0 // Increased life
+        ));
+      }
+    }
+
+    function renderFrame() {
+      requestAnimationFrame(renderFrame);
+      time += 0.05;
+
+      analyser.getByteFrequencyData(dataArray);
+
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const bufferLength = analyser.frequencyBinCount;
+      const numFlames = 80;
+      const flameSpacing = canvas.width / numFlames;
+
+      const fMin = 20;
+      const fMax = audioContext.sampleRate / 2;
+      const logFMin = Math.log10(fMin);
+      const logFMax = Math.log10(fMax);
+      const logRange = logFMax - logFMin;
+      const freqToIndex = (f) => Math.round(f / (audioContext.sampleRate / 2) * bufferLength);
+
+      for (let i = 0; i < numFlames; i++) {
+        const logF1 = (i / numFlames) * logRange + logFMin;
+        const logF2 = ((i + 1) / numFlames) * logRange + logFMin;
+        const f1 = Math.pow(10, logF1);
+        const f2 = Math.pow(10, logF2);
+
+        const startIndex = freqToIndex(f1);
+        const endIndex = Math.min(freqToIndex(f2), bufferLength - 1);
+
+        let sum = 0;
+        let count = 0;
+        for (let j = startIndex; j <= endIndex; j++) {
+            sum += dataArray[j];
+            count++;
+        }
+
+        // Apply sensitivity multiplier
+        let intensity = (count > 0 ? sum / count : 0) * sensitivity;
+        intensity = Math.min(255, intensity);
+
+        const reactiveIntensity = Math.pow(intensity / 255, 1.2);
+        const flameHeight = (0.025 + reactiveIntensity * 0.475) * canvas.height * 1.1;
+        const flameWidth = flameSpacing * 4;
+
+        if (flameHeight > 5) {
+          drawFlame(i * flameSpacing + flameSpacing / 2, flameWidth, flameHeight, intensity);
+        }
+      }
+
+      for (let i = particles.length - 1; i >= 0; i--) {
+        particles[i].update();
+        particles[i].draw();
+        if (particles[i].life <= 0 || particles[i].size <= 0.1) {
+          particles.splice(i, 1);
+        }
+      }
+
+      if (particles.length > 200) particles.shift();
+    }
+
+    window.addEventListener('resize', () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    });
+  </script>
+</body>
+</html>
